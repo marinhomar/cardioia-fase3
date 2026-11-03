@@ -1,0 +1,29 @@
+API e correio de teste ligados.
+
+API em http://127.0.0.1:5000
+{'leituras_guardadas': 0, 'status': 'ok'}
+
+ nº |  temp |  bpm | situação                   | resultado
+------------------------------------------------------------------------------------------
+  1 |  36.6 |   78 | normal                     | NORMAL
+  2 |  36.7 |   82 | normal                     | NORMAL
+  3 |  36.8 |   80 | normal                     | NORMAL
+   [correio de teste] e-mail recebido para equipe.plantao@cardioia.local -> 20261103_171542_898475.eml
+  4 |  38.4 |   92 | começa a febre             | ATENÇÃO: FEBRE  -> e-mail enviado
+   [correio de teste] e-mail recebido para equipe.plantao@cardioia.local -> 20261103_171543_208923.eml
+  5 |  39.6 |  104 | febre alta                 | CRÍTICO: FEBRE  -> e-mail enviado
+   [correio de teste] e-mail recebido para equipe.plantao@cardioia.local -> 20261103_171543_519103.eml
+  6 |  38.9 |  136 | coração acelera            | ATENÇÃO: FEBRE, TAQUICARDIA  -> e-mail enviado
+   [correio de teste] e-mail recebido para equipe.plantao@cardioia.local -> 20261103_171543_828463.eml
+  7 |  38.7 |  158 | coração muito acelerado    | CRÍTICO: FEBRE, TAQUICARDIA  -> e-mail enviado
+  8 |  37.4 |    0 | sensor sem pulso           | NORMAL
+  9 |  37.3 |    0 | sensor sem pulso           | NORMAL
+   [correio de teste] e-mail recebido para equipe.plantao@cardioia.local -> 20261103_171544_748037.eml
+ 10 |  37.3 |    0 | sensor sem pulso           | CRÍTICO: SEM_PULSO  -> e-mail enviado
+ 11 |  36.9 |   74 | pulso volta                | NORMAL
+ 12 |  36.7 |   76 | normal                     | NORMAL
+------------------------------------------------------------------------------------------
+Fim: 12 leituras guardadas na API e 5 e-mails de alerta enviados.
+
+API e correio de teste desligados.
+E-mails salvos na pasta caixa_de_entrada/

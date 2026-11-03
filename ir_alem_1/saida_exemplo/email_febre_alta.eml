@@ -1,0 +1,20 @@
+From: monitor@cardioia.local
+To: equipe.plantao@cardioia.local
+Subject: [CardioIA] =?utf-8?q?CR=C3=8DTICO=3A?= FEBRE - CARDIO-001
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+MIME-Version: 1.0
+
+Olá, equipe.
+
+O monitor cardíaco vinculado ao código CARDIO-001 registrou o seguinte:
+
+  - Febre alta: 39,6 °C (crítico)
+
+Leitura nº 5, recebida em 2026-11-03T17:15:43.
+Temperatura: 39,6 °C | Batimentos: 104 por minuto
+
+Sugestão: verificar a pessoa e confirmar a medição.
+
+Este é um aviso automático do protótipo CardioIA (projeto acadêmico FIAP).
+Ele não substitui a avaliação de profissionais de saúde.
