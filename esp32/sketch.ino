@@ -1,35 +1,33 @@
 /*
-  CardioIA Conectada — Fase 3 (FIAP, 2º ano)
-  Monitor cardíaco vestível simulado no Wokwi com ESP32.
+  CardioIA Conectada | Fase 3 | FIAP, Inteligência Artificial, 2º ano
+  Marlon Paulino Marinho, RM566793, Grupo 67
 
-  O que este código faz, em ordem:
-   1. Lê a temperatura e a umidade do DHT22 (sensor 1).
-   2. Calcula o BPM a partir de um botão (sensor 2): cada toque = 1 batimento.
-   3. Guarda cada leitura num buffer circular na memória do próprio ESP32 (Edge).
-   4. Olha a chave deslizante, que simula o Wi-Fi (variável booleana wifiSimulado).
-      - Desligada (OFFLINE): continua coletando e guardando. Nada se perde.
-      - Ligada (ONLINE): envia tudo o que está guardado (Serial + MQTT) e esvazia o buffer.
-   5. Acende o LED vermelho quando há alerta (febre, taquicardia ou bradicardia).
+  Um monitor cardíaco vestível simulado no Wokwi.
 
-  Broker MQTT: broker.hivemq.com (HiveMQ público, porta 1883, sem login).
-  Tópicos:  cardioia/rm566793/vitais   (uma leitura por mensagem, JSON)
-            cardioia/rm566793/status   (online/offline e ocupação do buffer)
+  Em poucas palavras, a cada 2 segundos o aparelho:
+    1. mede a temperatura no DHT22 e calcula os batimentos pelos toques no botão;
+    2. acende o LED vermelho se encontrar febre, coração acelerado ou coração lento;
+    3. guarda a leitura na memória, com ou sem internet;
+    4. se a chave do "Wi-Fi" estiver ligada, envia o que estiver guardado
+       (pelo Monitor Serial e por MQTT) e libera a memória.
 
-  Autor: Marlon Paulino Marinho — RM566793
+  Para onde vão os dados: broker público da HiveMQ (broker.hivemq.com, porta 1883).
+    cardioia/rm566793/vitais  -> uma leitura por mensagem, em JSON
+    cardioia/rm566793/status  -> se o aparelho está online e quanto tem guardado
 */
 
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "DHTesp.h"
 
-// ---------------- Pinos ----------------
+// ---------------- Onde cada peça está ligada ----------------
 const int PINO_DHT     = 15;  // DHT22: temperatura e umidade
-const int PINO_BOTAO   = 4;   // botão de batimento (INPUT_PULLUP, outro lado no GND)
-const int PINO_CHAVE   = 5;   // chave deslizante: simula Wi-Fi ligado/desligado
-const int PINO_LED_AL  = 2;   // LED vermelho: alerta clínico
-const int PINO_LED_NET = 18;  // LED azul: online (enviando para a nuvem)
+const int PINO_BOTAO   = 4;   // botão: cada toque é um batimento
+const int PINO_CHAVE   = 5;   // chave deslizante: funciona como o Wi-Fi
+const int PINO_LED_AL  = 2;   // LED vermelho: sinal de risco
+const int PINO_LED_NET = 18;  // LED azul: conectado e enviando
 
-// ---------------- Rede e MQTT ----------------
+// ---------------- Rede e envio por MQTT ----------------
 const char* WIFI_SSID   = "Wokwi-GUEST";   // rede virtual do Wokwi (sem senha)
 const char* WIFI_SENHA  = "";
 const char* MQTT_HOST   = "broker.hivemq.com";
@@ -37,29 +35,28 @@ const int   MQTT_PORTA  = 1883;
 const char* TOPICO_DADOS  = "cardioia/rm566793/vitais";
 const char* TOPICO_STATUS = "cardioia/rm566793/status";
 
-// ---------------- Regras clínicas (limites definidos pelo projeto) ----------------
-const float TEMP_FEBRE    = 38.0;  // °C: acima disso = febre
-const int   BPM_TAQUI     = 120;   // acima disso = taquicardia
-const int   BPM_BRADI     = 50;    // abaixo disso (com pulso detectado) = bradicardia
+// ---------------- Limites de alerta (didáticos, não substituem avaliação médica) ----------------
+const float TEMP_FEBRE    = 38.0;  // °C: acima disso, febre
+const int   BPM_TAQUI     = 120;   // batimentos por minuto: acima disso, coração acelerado
+const int   BPM_BRADI     = 50;    // abaixo disso (havendo pulso), coração lento
 
-// ---------------- Tempo ----------------
-const unsigned long INTERVALO_LEITURA_MS = 2000;  // demo: 1 leitura a cada 2 s
-                                                   // no produto real: 1 a cada 10 s
-const unsigned long JANELA_BPM_MS = 6000;          // sem toque há 6 s = sem leitura de pulso
+// ---------------- Ritmo das medições ----------------
+const unsigned long INTERVALO_LEITURA_MS = 2000;  // na demonstração: uma leitura a cada 2 s
+                                                   // no uso real eu usaria uma a cada 10 s
+const unsigned long JANELA_BPM_MS = 6000;          // 6 s sem toque = sem pulso detectado
 
-// ---------------- Buffer circular (resiliência offline) ----------------
-// Por que 3000 amostras? Cada leitura ocupa 12 bytes -> 36 KB de RAM (o ESP32 tem ~320 KB).
-// No produto real (1 leitura a cada 10 s), 3000 amostras = 8 h 20 min sem internet:
-// cobre uma noite inteira de sono ou um turno, o pior caso do nosso paciente vestível.
-// Se encher, a leitura MAIS ANTIGA é sobrescrita (FIFO) e contamos a perda.
+// ---------------- Reserva para quando a internet cai ----------------
+// Cabem 3000 leituras. Cada uma ocupa 12 bytes, então são uns 36 KB de memória.
+// Com uma leitura a cada 10 s, isso cobre mais de 8 horas sem internet: uma noite inteira.
+// Se encher, a leitura mais antiga dá lugar à mais nova e o contador "perdidas" registra.
 const int CAPACIDADE = 3000;
 
 struct Leitura {
-  uint32_t seq;      // número da leitura (para achar buracos no histórico)
-  uint32_t t_ms;     // momento da leitura, em ms desde que o aparelho ligou
-  int16_t  temp10;   // temperatura x10 (36.8 °C -> 368) para caber em 2 bytes
+  uint32_t seq;      // número da leitura: um buraco na sequência mostra que algo se perdeu
+  uint32_t t_ms;     // quando foi medida (milissegundos desde que o aparelho ligou)
+  int16_t  temp10;   // temperatura vezes 10 (36,8 °C vira 368), para ocupar menos espaço
   uint8_t  umid;     // umidade em %
-  uint8_t  bpm;      // batimentos por minuto (0 = sem pulso detectado)
+  uint8_t  bpm;      // batimentos por minuto (0 = nenhum pulso detectado)
 };
 
 Leitura buffer[CAPACIDADE];
@@ -68,8 +65,8 @@ int qtd = 0;              // quantas leituras estão guardadas
 uint32_t perdidas = 0;    // quantas foram sobrescritas por falta de espaço
 uint32_t seqAtual = 0;
 
-// ---------------- Batimentos (sensor 2: botão) ----------------
-// A interrupção grava o horário de cada toque. Com os últimos toques calculamos o BPM.
+// ---------------- Batimentos a partir do botão ----------------
+// Cada toque guarda o horário. A média do intervalo entre os últimos toques vira o BPM.
 const int MAX_TOQUES = 6;
 volatile unsigned long toques[MAX_TOQUES];
 volatile int nToques = 0;
@@ -77,11 +74,11 @@ volatile unsigned long ultimoToque = 0;
 
 void IRAM_ATTR aoTocar() {
   unsigned long agora = millis();
-  if (agora - ultimoToque < 200) return;   // anti-repique: ignora toques < 200 ms (máx. 300 bpm)
+  if (agora - ultimoToque < 200) return;   // ignora toques com menos de 200 ms de diferença (ruído do botão)
   ultimoToque = agora;
   if (nToques < MAX_TOQUES) {
     toques[nToques++] = agora;
-  } else {                                 // desliza a janela: descarta o toque mais velho
+  } else {                                 // lista cheia: sai o toque mais antigo, entra o novo
     for (int i = 1; i < MAX_TOQUES; i++) toques[i - 1] = toques[i];
     toques[MAX_TOQUES - 1] = agora;
   }
@@ -95,13 +92,13 @@ int calcularBPM() {
   interrupts();
   if (n < 2 || millis() - ultimo > JANELA_BPM_MS) {
     if (n > 0 && millis() - ultimo > JANELA_BPM_MS) { noInterrupts(); nToques = 0; interrupts(); }
-    return 0;                              // sem pulso recente = sem leitura
+    return 0;                              // nenhum toque recente: sem pulso
   }
-  // média dos intervalos entre toques -> batimentos por minuto
+  // média do intervalo entre os toques, convertida para batimentos por minuto
   return (int)(60000.0 * (n - 1) / (ultimo - primeiro) + 0.5);
 }
 
-// ---------------- Objetos ----------------
+// ---------------- Peças de software ----------------
 DHTesp dht;
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -109,12 +106,12 @@ unsigned long ultimaLeitura = 0;
 unsigned long ultimaTentativaMqtt = 0;
 bool estavaOnline = false;
 
-// ---------------- Buffer: guardar e ler ----------------
+// ---------------- Guardar na reserva ----------------
 void guardar(const Leitura& l) {
   if (qtd < CAPACIDADE) {
     buffer[(inicio + qtd) % CAPACIDADE] = l;
     qtd++;
-  } else {                                 // cheio: sobrescreve a mais antiga
+  } else {                                 // cheia: a mais antiga dá lugar à nova
     buffer[inicio] = l;
     inicio = (inicio + 1) % CAPACIDADE;
     perdidas++;
@@ -131,7 +128,7 @@ String classificar(float temp, int bpm) {
 
 String paraJSON(const Leitura& l) {
   float temp = l.temp10 / 10.0;
-  unsigned long atraso = (millis() - l.t_ms) / 1000;   // há quantos segundos foi medida
+  unsigned long atraso = (millis() - l.t_ms) / 1000;   // há quantos segundos foi medida (0 = ao vivo)
   String j = "{";
   j += "\"id\":\"cardioia-rm566793\",";
   j += "\"seq\":" + String(l.seq) + ",";
@@ -144,9 +141,9 @@ String paraJSON(const Leitura& l) {
   return j;
 }
 
-// ---------------- Conectividade ----------------
+// ---------------- Conexão ----------------
 bool wifiSimulado() {
-  // Variável booleana pedida no enunciado: a chave deslizante decide se há "internet".
+  // O enunciado pede uma variável booleana para o Wi-Fi. Aqui ela vem da chave deslizante.
   return digitalRead(PINO_CHAVE) == HIGH;
 }
 
@@ -163,7 +160,7 @@ void conectarWiFiReal() {
 
 bool garantirMqtt() {
   if (mqtt.connected()) return true;
-  if (millis() - ultimaTentativaMqtt < 5000) return false;   // tenta de novo a cada 5 s, sem travar
+  if (millis() - ultimaTentativaMqtt < 5000) return false;   // tenta de novo a cada 5 s, sem parar de medir
   ultimaTentativaMqtt = millis();
   if (WiFi.status() != WL_CONNECTED) { WiFi.reconnect(); return false; }
   String clientId = "cardioia-rm566793-" + String((uint32_t)ESP.getEfuseMac(), HEX);
@@ -180,11 +177,11 @@ void publicarStatus(const char* estado) {
   if (!mqtt.connected()) return;
   String s = "{\"estado\":\"" + String(estado) + "\",\"buffer\":" + String(qtd) +
              ",\"capacidade\":" + String(CAPACIDADE) + ",\"perdidas\":" + String(perdidas) + "}";
-  mqtt.publish(TOPICO_STATUS, s.c_str(), true);   // retain: o painel vê o último estado ao abrir
+  mqtt.publish(TOPICO_STATUS, s.c_str(), true);   // "retain": quem abrir o painel depois já vê o último estado
 }
 
-// Envia tudo o que está guardado e "apaga o arquivo local" (esvazia o buffer).
-// No máximo 25 por volta do loop, para o aparelho não travar se houver milhares guardadas.
+// Envia o que está guardado, da leitura mais antiga para a mais nova, e libera a memória.
+// Vão no máximo 25 por vez, para o aparelho continuar medindo mesmo com milhares na fila.
 void sincronizar() {
   int enviadas = 0;
   int pendentesAntes = qtd;
@@ -192,20 +189,20 @@ void sincronizar() {
     String json = paraJSON(buffer[inicio]);
     if (!mqtt.publish(TOPICO_DADOS, json.c_str())) {
       Serial.println("[MQTT] envio falhou; a leitura continua guardada");
-      return;                              // só apaga depois de enviar com sucesso
+      return;                              // só libera a leitura depois que o envio deu certo
     }
     Serial.println("[NUVEM] " + json);
     inicio = (inicio + 1) % CAPACIDADE;
     qtd--;
     enviadas++;
   }
-  if (pendentesAntes > 1 && qtd == 0) {   // só avisa quando havia atraso acumulado
+  if (pendentesAntes > 1 && qtd == 0) {   // só avisa quando havia leituras acumuladas
     Serial.println("[SYNC] buffer vazio: tudo sincronizado");
     publicarStatus("online");
   }
 }
 
-// ---------------- setup / loop ----------------
+// ---------------- Início e repetição ----------------
 void setup() {
   Serial.begin(115200);
   pinMode(PINO_BOTAO, INPUT_PULLUP);
@@ -230,17 +227,19 @@ void loop() {
   if (mqtt.connected()) mqtt.loop();
   digitalWrite(PINO_LED_NET, online ? HIGH : LOW);
 
-  if (online != estavaOnline) {            // mudou de estado: avisa no Serial e no broker
+  if (online != estavaOnline) {            // a conexão mudou: avisa no Serial e no broker
     if (online) {
       Serial.println("[REDE] ONLINE: sincronizando " + String(qtd) + " leituras guardadas");
       publicarStatus("online");
     } else {
       Serial.println("[REDE] OFFLINE: coletando e guardando no ESP32");
+      publicarStatus("offline");   // avisa o painel antes de soltar a conexão
+      mqtt.disconnect();
     }
     estavaOnline = online;
   }
 
-  // 1) Coleta: acontece SEMPRE, com ou sem internet
+  // 1) Medir: acontece sempre, com ou sem internet
   if (millis() - ultimaLeitura >= INTERVALO_LEITURA_MS) {
     ultimaLeitura = millis();
     TempAndHumidity th = dht.getTempAndHumidity();
@@ -255,17 +254,18 @@ void loop() {
       l.bpm    = (uint8_t)constrain(calcularBPM(), 0, 255);
       guardar(l);
 
-      String alerta = classificar(th.temperature, l.bpm);
+      // classifica com o mesmo valor arredondado que vai no JSON, para LED e painel concordarem
+      String alerta = classificar(l.temp10 / 10.0, l.bpm);
       digitalWrite(PINO_LED_AL, alerta != "OK" ? HIGH : LOW);
 
       if (!online) {
         Serial.printf("[OFFLINE] leitura #%lu guardada | %.1f C | %u bpm | %s | buffer %d/%d | perdidas %lu\n",
-                      (unsigned long)l.seq, th.temperature, l.bpm, alerta.c_str(), qtd, CAPACIDADE,
+                      (unsigned long)l.seq, l.temp10 / 10.0, l.bpm, alerta.c_str(), qtd, CAPACIDADE,
                       (unsigned long)perdidas);
       }
     }
   }
 
-  // 2) Envio: só quando há conexão
+  // 2) Enviar: só quando há conexão
   if (online) sincronizar();
 }
