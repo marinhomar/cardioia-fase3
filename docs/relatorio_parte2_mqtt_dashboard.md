@@ -1,108 +1,120 @@
-# Relatório — Parte 2: transmissão para a nuvem e visualização (Fog/Cloud Computing)
+# Parte 2: envio para a nuvem e painel de acompanhamento
 
-**Projeto:** CardioIA Conectada — Fase 3  
-**Aluno:** Marlon Paulino Marinho — RM566793  
-**Simulação:** https://wokwi.com/projects/479676068207522817  
-**Arquivos:** `esp32/sketch.ino` e `node-red/flow_cardioia.json`
+**CardioIA Conectada, Fase 3** · Marlon Paulino Marinho, RM566793 · Grupo 67  
+Simulação: https://wokwi.com/projects/479676068207522817 · Arquivos: `esp32/sketch.ino` e `node-red/flow_cardioia.json`
 
-## 1. Visão geral da arquitetura
+## A visão geral
 
-```
-[ESP32 / Wokwi] --publica--> [HiveMQ] --assina--> [Node-RED] --> [Dashboard]
- DHT22 + botão              broker.hivemq.com      regras de     gráfico, gauge,
- buffer offline (Edge)      porta 1883             alerta (Fog)  texto e LED
-```
+Na Parte 1, o ESP32 mede e guarda as leituras. Nesta parte, elas saem do aparelho e chegam a um painel que uma equipe de saúde poderia acompanhar de longe. O caminho tem quatro paradas:
 
-Cada camada tem um papel:
+![Diagrama do caminho de uma leitura: ESP32 (edge), broker HiveMQ (mensageiro), Node-RED (fog) e dashboard (visualização)](img/arquitetura.png)
 
-| Camada | Onde roda | O que faz |
+1. O ESP32 publica cada leitura.
+2. O broker HiveMQ recebe e entrega a quem pediu para receber.
+3. O Node-RED, rodando no meu computador, recebe, confere os limites e organiza os dados.
+4. O painel (dashboard) mostra tudo em tempo real.
+
+O Node-RED representa a camada *fog*, um computador perto da pessoa que trata os dados antes de irem para longe. O broker representa a nuvem.
+
+## Como as mensagens viajam: o MQTT
+
+Para levar os dados usei o MQTT, um protocolo de mensagens feito para aparelhos pequenos e redes instáveis. Ele funciona como uma assinatura de jornal: quem produz a notícia publica num tópico, que é como o nome de uma seção, e quem quer ler assina aquele tópico. O ESP32 publica sem saber quem vai ler. A ponte entre os dois é o broker, o "correio" do MQTT.
+
+Preferi o MQTT a um envio por HTTP a cada leitura principalmente porque a conexão fica aberta o tempo todo. O aparelho não precisa abrir uma conversa nova para cada leitura, as mensagens ficam menores e, quando o sinal cai, reconectar é simples.
+
+### O broker
+
+Usei o broker público da HiveMQ (`broker.hivemq.com`, porta 1883). Ele funciona dentro do Wokwi e não pede cadastro, o que facilita para quem for corrigir. A contrapartida é que ele não tem senha. Na seção de segurança, mais abaixo, explico o que mudaria num produto real.
+
+### Os tópicos
+
+Coloquei meu RM no nome dos tópicos para meus dados não se misturarem com os de outras pessoas que usam o mesmo broker público.
+
+| Tópico | Quem publica | O que leva |
 |---|---|---|
-| **Edge** | ESP32 (Wokwi) | Lê sensores, calcula BPM, acende o alerta local e guarda leituras quando está offline |
-| **Mensageria** | HiveMQ (broker MQTT) | Recebe as mensagens publicadas e entrega a quem assinou o tópico |
-| **Fog** | Node-RED no computador local | Assina os tópicos, separa os sinais, reaplica as regras de alerta e alimenta o painel |
-| **Visualização** | Node-RED Dashboard | Gráfico em tempo real, gauge, texto de estado e LED virtual |
+| `cardioia/rm566793/vitais` | ESP32 | Uma leitura por mensagem |
+| `cardioia/rm566793/status` | ESP32 | Se o aparelho está online e quantas leituras estão guardadas |
 
-## 2. Fluxo de comunicação MQTT
+### O formato de cada leitura
 
-**Por que MQTT.** É um protocolo leve de publicação e assinatura, feito para aparelhos com pouca bateria e rede instável. O ESP32 não precisa saber quem vai ler os dados: ele só publica num **tópico**. Quem quiser recebe por assinatura. Cabeçalho mínimo, conexão sempre aberta e reconexão simples.
-
-**Broker.** Usamos o broker público da HiveMQ (`broker.hivemq.com`, porta 1883, sem usuário e senha). Ele funciona dentro do simulador pela rede `Wokwi-GUEST` e dispensa cadastro. A troca para o **HiveMQ Cloud** (cluster privado, TLS na porta 8883, usuário com permissão em *Access Management*) muda só três linhas: host, porta e `WiFiClientSecure` com usuário e senha. Veja a seção 5.
-
-**Tópicos.** Um prefixo com o RM evita misturar dados com outros alunos no broker público.
-
-| Tópico | Quem publica | Conteúdo | Retain |
-|---|---|---|---|
-| `cardioia/rm566793/vitais` | ESP32 | Uma leitura por mensagem (JSON) | Não |
-| `cardioia/rm566793/status` | ESP32 | Estado da conexão e ocupação do buffer | Sim |
-
-**Formato da mensagem (`vitais`):**
+Usei JSON, que é texto organizado em pares nome e valor:
 
 ```json
 {"id":"cardioia-rm566793","seq":42,"temp":36.6,"umid":55,"bpm":84,"alerta":"OK","atraso_s":0}
 ```
 
-- `seq`: número da leitura, que permite achar buracos e evitar duplicidade.
-- `atraso_s`: há quantos segundos a leitura foi medida. É 0 quando o dado é ao vivo e maior quando veio do buffer offline.
-- `alerta`: classificação já feita no ESP32 (Edge), para o caso de a nuvem estar fora.
+`seq` é o número da leitura, que mostra se alguma faltou. `atraso_s` diz há quantos segundos ela foi medida: zero quando é ao vivo e mais que zero quando veio da reserva offline. `alerta` já chega classificado pelo próprio aparelho, para o caso de a nuvem estar fora do ar.
 
-**Sequência de uma mensagem:**
+**O caminho de uma mensagem, passo a passo:**
 
-1. O ESP32 conecta no Wi-Fi do simulador e abre a sessão MQTT com um `clientId` único (`cardioia-rm566793-<MAC>`).
-2. Na conexão, registra uma **mensagem de testamento** (*Last Will*) no tópico `status`: `{"estado":"desconectado"}`. Se a placa cair sem avisar, o próprio broker publica esse aviso e o painel mostra o dispositivo desconectado.
-3. A cada leitura, o ESP32 publica no tópico `vitais` com QoS 0.
-4. O broker entrega a mensagem ao Node-RED, que assinou o mesmo tópico.
-5. Em caso de falha no `publish`, a leitura **não sai do buffer** e é reenviada na próxima volta (seção 3 do relatório da Parte 1).
-6. A cada 5 s sem conexão, o ESP32 tenta reconectar sem travar a leitura dos sensores.
+1. Ao ligar, o ESP32 entra no Wi-Fi do simulador e abre a conexão com o broker usando um nome único.
+2. Nessa conexão ele deixa registrado um "último recado" (em inglês, *Last Will*): se a conexão cair de repente, o próprio broker publica no tópico de status que o aparelho está desconectado. Assim o painel percebe a queda mesmo que o aparelho não consiga avisar.
+3. A cada leitura, o ESP32 publica no tópico `vitais`.
+4. O broker entrega a mensagem ao Node-RED, que assinou esse tópico.
+5. Se uma publicação falha, a leitura continua guardada no aparelho e é enviada de novo na próxima tentativa.
+6. Sem conexão, o ESP32 tenta reconectar a cada 5 segundos, sem parar de medir.
 
-**Por que QoS 0.** Com QoS 0 o envio é "no máximo uma vez", o mais leve. A garantia de entrega fica no próprio ESP32: a leitura só é apagada depois do `publish` aceito, e o `seq` permite detectar perdas. Num produto real o próximo passo é QoS 1 ("pelo menos uma vez"), com o `seq` servindo para descartar duplicatas.
+### O nível de garantia de entrega
 
-## 3. Configuração do dashboard no Node-RED
+O MQTT tem três níveis de garantia (QoS 0, 1 e 2). Usei o 0, o mais leve, porque a garantia já está no próprio aparelho: a leitura só sai da memória depois de enviada, e a numeração denuncia qualquer falta. Num produto real eu passaria para o QoS 1 ("entrega pelo menos uma vez") e usaria o número da leitura para descartar repetidas.
 
-**Instalação.** Node.js LTS e `npm install -g --unsafe-perm node-red`. No editor (`http://127.0.0.1:1880`), em *Manage palette*, instala-se o pacote **node-red-dashboard**. O fluxo é importado pelo menu *Import* com o arquivo `node-red/flow_cardioia.json`. O painel abre em `http://127.0.0.1:1880/ui`.
+## Como montei o painel no Node-RED
 
-**Nós do fluxo:**
+O Node-RED é uma ferramenta em que o tratamento dos dados é montado ligando blocos com setas, em vez de escrever um programa inteiro. Cada bloco se chama **nó**. Instalei o Node-RED no meu computador e o pacote `node-red-dashboard`, que traz os blocos de gráfico, medidor e texto. O fluxo completo está no arquivo `node-red/flow_cardioia.json` e pode ser importado pelo menu *Import*.
 
-| Nó | Tipo | Configuração |
+| Nó | O que faz |
+|---|---|
+| ESP32 -> vitais | Assina o tópico das leituras e já transforma o texto JSON em dados |
+| Separar sinais e checar limites | Divide a leitura entre os elementos do painel e confere de novo os limites de alerta |
+| Gráfico BPM e temperatura | Linha do tempo com os batimentos (vermelho) e a temperatura (azul) dos últimos 10 minutos |
+| Gauge temperatura | Medidor de 34 a 42 °C: azul até 37,5, verde até 38 e vermelho acima disso |
+| Texto de alerta | Escreve "Normal" ou o nome do alerta, o número da leitura e se ela veio da reserva |
+| LED de alerta | Círculo verde quando está tudo bem e vermelho quando há alerta |
+| ESP32 -> status | Mostra se o aparelho está online, quantas leituras estão guardadas e se alguma se perdeu |
+| Ver JSON recebido | Mostra cada mensagem bruta na lateral do editor, para conferência |
+
+**Os limites de alerta que defini:**
+
+| Sinal | Limite | Alerta |
 |---|---|---|
-| ESP32 -> vitais | `mqtt in` | Broker HiveMQ, tópico `cardioia/rm566793/vitais`, saída *parsed JSON* |
-| Separar sinais e checar limites | `function` (5 saídas) | Separa BPM e temperatura para o gráfico, temperatura para o gauge, texto de estado e sinal do LED |
-| Gráfico BPM e temperatura | `ui_chart` (linha) | Duas séries (BPM em vermelho, temperatura em azul), janela de 10 minutos, eixo 0–200 |
-| Gauge temperatura | `ui_gauge` | 34 a 42 °C. Faixas: azul até 37,5, verde até 38 e vermelho acima de 38 (febre) |
-| Texto de alerta | `ui_text` | "● Normal" ou "⚠ FEBRE / TAQUICARDIA / BRADICARDIA", com nº da leitura e indicação "veio do buffer" |
-| LED de alerta | `function` + `ui_template` | Círculo verde (normal) ou vermelho piscando (alerta) |
-| ESP32 -> status | `mqtt in` + `ui_text` | Mostra online/desconectado, ocupação do buffer e leituras perdidas |
-| Ver JSON recebido | `debug` | Mostra cada mensagem bruta na barra lateral, para conferência |
+| Temperatura | acima de 38,0 °C | FEBRE |
+| Batimentos | acima de 120 por minuto | TAQUICARDIA |
+| Batimentos | abaixo de 50 por minuto (com pulso) | BRADICARDIA |
 
-**Regras de alerta (definidas pelo projeto):**
+Coloquei a regra em dois lugares. No ESP32 ela acende o LED mesmo sem internet. No Node-RED ela é conferida de novo quando o dado chega. Assim dá para ajustar os limites no painel sem regravar o aparelho, e o alerta continua funcionando se uma das partes falhar.
 
-| Parâmetro | Limite | Alerta |
-|---|---|---|
-| Temperatura | > 38,0 °C | FEBRE |
-| Batimentos | > 120 bpm | TAQUICARDIA |
-| Batimentos | < 50 bpm (com pulso detectado) | BRADICARDIA |
+## O que o teste mostrou
 
-A regra existe em dois lugares de propósito. No **ESP32** ela acende o LED físico mesmo sem internet (Edge). No **Node-RED** ela é recalculada sobre o dado recebido (Fog). Assim os limites podem mudar no painel sem regravar a placa, e o alerta continua funcionando se uma das camadas falhar.
+Fiz o teste em 03/11/2026, com o ESP32 no Wokwi e o Node-RED no meu computador. As duas entradas MQTT ficaram com o status "conectado" e cada leitura apareceu na lateral do editor.
 
-## 4. Evidências
+![Fluxo no Node-RED: as duas entradas MQTT conectadas e as mensagens chegando na barra lateral](../prints/03_nodered_fluxo.jpg)
 
-Teste feito em 03/11/2026, com o ESP32 rodando no Wokwi e o Node-RED 5.0.9 rodando localmente (node-red-dashboard 3.6.6). Os dois nós MQTT ficaram com status **conectado**, e a barra de *debug* mostrou cada JSON recebido. Todas as imagens estão na pasta `prints/` do repositório.
+![Painel em alerta de febre: o medidor marca 38,9 °C no vermelho e o LED de alerta está aceso](../prints/05_dashboard_febre.jpg)
 
-![Fluxo no Node-RED: nós MQTT conectados e JSON chegando na barra de debug](../prints/03_nodered_fluxo.jpg)
+![Painel em alerta de taquicardia: o gráfico mostra os batimentos acima de 120 por minuto](../prints/06_dashboard_taquicardia.jpg)
 
-![Dashboard em alerta de FEBRE: gauge no vermelho (38,9 °C) e LED virtual aceso](../prints/05_dashboard_febre.jpg)
+![Painel de volta ao normal: 36,8 °C, LED verde, nenhuma leitura guardada e nenhuma perdida](../prints/04_dashboard_normal.jpg)
 
-![Dashboard em alerta de TAQUICARDIA: BPM acima de 120 no gráfico](../prints/06_dashboard_taquicardia.jpg)
+Um detalhe do gráfico: o primeiro pico de batimentos aparece quase em pé porque as 20 leituras guardadas offline chegaram todas de uma vez. O gráfico usa a hora de chegada, não a hora da medição. O texto de estado compensa isso e avisa quando a leitura veio da reserva.
 
-![Dashboard de volta ao normal: temperatura 36,8 °C, LED verde, buffer 0/3000 e nenhuma leitura perdida](../prints/04_dashboard_normal.jpg)
+## Eficiência, segurança e cuidado com quem usa
 
-**Observação sobre o gráfico.** O primeiro pico de BPM aparece quase vertical porque as 20 leituras guardadas offline chegaram de uma vez na sincronização. O gráfico usa a hora de chegada. O texto de estado indica quando a leitura "veio do buffer", com base no campo `atraso_s`.
+### Eficiência
 
-## 5. Eficiência, segurança e boas práticas em IoT médico
+Cada mensagem tem cerca de 100 caracteres. Com uma leitura a cada 10 segundos, isso dá cerca de 1 MB por dia por pessoa monitorada.
 
-- **Eficiência.** Mensagens de cerca de 100 bytes, sem cabeçalho HTTP, e uma conexão MQTT reaproveitada. No produto real, 1 leitura a cada 10 s dá cerca de 860 KB por dia por paciente.
-- **Privacidade (LGPD).** Dado de saúde é dado pessoal sensível. A mensagem não leva nome nem CPF, só um identificador do aparelho (`cardioia-rm566793`). A ligação aparelho–paciente fica no sistema do hospital, fora do broker.
-- **Segurança na versão de produção.** O broker público serve só para demonstração: qualquer pessoa que souber o tópico consegue ler. Em produção:
-  - usar HiveMQ Cloud com **TLS (porta 8883)**, usuário e senha por dispositivo, e permissão restrita ao próprio tópico;
-  - guardar credenciais fora do código, nunca no repositório público.
-- **Confiabilidade.** Alerta local no Edge, *Last Will* para detectar queda e numeração `seq` para auditoria de perdas.
-- **Limitação do protótipo.** O BPM é simulado por toques num botão, não por um sensor de pulso real (como o MAX30102). Os limites de alerta são didáticos e não substituem critério médico.
+### Privacidade
+
+Dado de saúde é dado pessoal sensível pela LGPD. Por isso a mensagem não leva nome nem documento, só o código do aparelho. A ligação entre aparelho e pessoa ficaria guardada no sistema do hospital, e não no broker.
+
+### Segurança num produto real
+
+O broker público serve para a demonstração, mas qualquer pessoa que souber o nome do tópico consegue ler as mensagens. Num produto de verdade eu usaria o HiveMQ Cloud com conexão criptografada (TLS, porta 8883), usuário e senha para cada aparelho e permissão só para o próprio tópico. As senhas ficariam fora do código e nunca iriam para um repositório público.
+
+### Acessibilidade
+
+O painel não depende só da cor: cada alerta também aparece escrito, o que ajuda quem tem dificuldade para distinguir vermelho e verde.
+
+### Limites do protótipo
+
+Os batimentos vêm de toques num botão, e não de um sensor de pulso de verdade (como o MAX30102). Os limites de alerta são didáticos e não substituem a avaliação de profissionais de saúde.

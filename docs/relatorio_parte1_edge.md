@@ -1,60 +1,69 @@
-# Relatório — Parte 1: armazenamento e processamento local (Edge Computing)
+# Parte 1: armazenamento e processamento no próprio aparelho
 
-**Projeto:** CardioIA Conectada — Fase 3  
-**Aluno:** Marlon Paulino Marinho — RM566793  
-**Simulação:** https://wokwi.com/projects/479676068207522817  
-**Código:** `esp32/sketch.ino`
+**CardioIA Conectada, Fase 3** · Marlon Paulino Marinho, RM566793 · Grupo 67  
+Simulação: https://wokwi.com/projects/479676068207522817 · Código: `esp32/sketch.ino`
 
-## 1. O que o protótipo simula
+## O que eu montei
 
-Um monitor cardíaco vestível. Um ESP32 lê dois sensores, guarda as leituras na própria placa quando não há internet e envia tudo quando a conexão volta. A ideia é que nenhuma leitura de um paciente cardiológico se perca por causa de uma queda de Wi-Fi.
+Simulei no Wokwi um monitor cardíaco vestível. A ideia é a de uma pulseira que uma pessoa com problema no coração usaria em casa. O "cérebro" é um ESP32, uma plaquinha com Wi-Fi muito usada em projetos de IoT, ligado a estas peças:
 
-| Componente | Pino | Papel |
+| Peça | Pino | Para que serve |
 |---|---|---|
-| DHT22 (sensor 1, obrigatório) | GPIO 15 | Temperatura (°C) e umidade (%) |
-| Botão "Batimento" (sensor 2) | GPIO 4 | Cada toque = 1 batimento; o código calcula o BPM |
-| Chave deslizante | GPIO 5 | Simula o Wi-Fi: direita = online, esquerda = offline |
-| LED vermelho | GPIO 2 | Acende quando há alerta clínico |
-| LED azul | GPIO 18 | Acende quando está online e enviando |
+| Sensor DHT22 | 15 | Mede a temperatura (e a umidade). É o sensor obrigatório. |
+| Botão vermelho | 4 | Cada toque conta como um batimento. É o meu segundo sensor. |
+| Chave deslizante | 5 | Funciona como o Wi-Fi: para a direita está online, para a esquerda, offline. |
+| LED vermelho | 2 | Acende quando aparece um sinal de risco. |
+| LED azul | 18 | Acende quando o aparelho está conectado e enviando. |
 
-## 2. Fluxo de funcionamento
+Escolhi o botão como segundo sensor porque o próprio enunciado sugere esse caminho para simular os batimentos. O código guarda o horário dos últimos 6 toques e calcula a média do intervalo entre eles. Um toque por segundo, por exemplo, dá 60 batimentos por minuto. Se ninguém tocar por 6 segundos, o aparelho registra 0, que aqui significa "sem pulso detectado".
 
-A cada 2 segundos (na demonstração) o ESP32 executa o mesmo ciclo:
+## Como o aparelho trabalha
 
-1. **Lê** temperatura e umidade do DHT22.
-2. **Calcula o BPM** com os últimos 6 toques no botão. O tempo médio entre toques vira batimentos por minuto. Sem toque há mais de 6 s, o BPM é registrado como 0 (sem pulso detectado).
-3. **Classifica** a leitura: FEBRE (> 38 °C), TAQUICARDIA (> 120 bpm), BRADICARDIA (< 50 bpm com pulso) ou OK. Com alerta, o LED vermelho acende na hora, mesmo offline. O alerta local não depende da nuvem.
-4. **Guarda** a leitura no buffer local, **sempre**, com ou sem internet.
-5. **Verifica a conexão** pela variável booleana `wifiSimulado()`, ligada à chave deslizante.
-   - **Offline:** mostra no Monitor Serial `[OFFLINE] leitura #N guardada | buffer N/3000` e segue coletando.
-   - **Online:** envia as leituras guardadas, da mais antiga para a mais nova, pelo `Serial.println` (`[NUVEM] {...}`) e por MQTT. Cada leitura só é apagada do buffer **depois** de ser enviada com sucesso.
+A cada 2 segundos na simulação (no uso real, eu usaria 10 segundos), o ESP32 repete o mesmo ciclo:
 
-## 3. Lógica de resiliência offline
+1. Lê a temperatura e calcula os batimentos.
+2. Confere os limites que defini: febre acima de 38 °C, coração acelerado (taquicardia) acima de 120 batimentos por minuto e coração lento (bradicardia) abaixo de 50. Se algum for ultrapassado, o LED vermelho acende na hora, com ou sem internet.
+3. Guarda a leitura na memória. Isso acontece sempre, mesmo quando há conexão.
+4. Olha a chave do Wi-Fi. Se estiver offline, só avisa no Monitor Serial que guardou mais uma leitura. Se estiver online, envia as leituras guardadas, da mais antiga para a mais nova, e apaga cada uma depois de enviada.
 
-**Onde guardar.** O enunciado pede SPIFFS, mas o próprio material explica que, no Wokwi, o SPIFFS é volátil e some ao fim da simulação. Por isso usamos um **buffer circular na RAM** do ESP32, com o Monitor Serial como registro da sincronização. Num aparelho físico, o mesmo buffer seria gravado em SPIFFS ou cartão microSD sem mudar a lógica.
+## A reserva para quando a internet cai
 
-**Quanto guardar (estratégia de armazenamento limitado).** O buffer tem **3.000 amostras**. Cada amostra ocupa 12 bytes (número da leitura, momento, temperatura ×10, umidade e BPM). Total de cerca de 36 KB, cerca de 11% da RAM do ESP32.
+Essa é a parte que considero mais importante, porque é ela que garante que nada se perde.
 
-O número vem do modelo de uso. No produto real, o vestível mede uma vez a cada 10 segundos. Então 3.000 amostras cobrem **8 h 20 min sem internet**, o equivalente a uma noite de sono ou um turno. É o cenário mais comum de perda de sinal para um paciente em casa.
+### Onde guardar
 
-**Quando o buffer enche.** Ele funciona como fila (FIFO). A leitura mais antiga é sobrescrita pela nova, e o contador `perdidas` registra quantas foram descartadas. Escolhemos descartar a mais antiga porque, para o cardiologista, o estado atual do paciente vale mais que o de 8 horas atrás.
+O enunciado sugere o SPIFFS, que é a memória de arquivos do ESP32. Só que, como o próprio material explica, no simulador essa memória é apagada quando a simulação para. Por isso guardei as leituras numa fila na memória RAM e usei o Monitor Serial como registro do que foi enviado. Num ESP32 de verdade, a mesma lógica gravaria no SPIFFS ou num cartão microSD.
 
-**Envio sem travar.** Ao voltar online, o ESP32 envia no máximo 25 leituras por volta do `loop()`. Assim, mesmo com 3.000 leituras guardadas, ele continua lendo os sensores e acendendo o alerta durante a sincronização.
+### Quanto guardar
 
-**Sem duplicar e sem perder.** Cada leitura tem um número sequencial (`seq`) e o campo `atraso_s`, que diz há quantos segundos ela foi medida. O painel mostra se o dado é "ao vivo" ou "veio do buffer", e um buraco na sequência denuncia perda.
+Defini espaço para 3.000 leituras. Cada uma ocupa 12 bytes (número da leitura, horário, temperatura, umidade e batimentos), então o total fica perto de 36 KB, cerca de 11% dos uns 320 KB de RAM que o ESP32 deixa livres para dados. Com uma leitura a cada 10 segundos, 3.000 leituras cobrem mais de 8 horas sem internet. Pensei no caso mais comum: a pessoa dorme, o roteador cai de madrugada e só volta de manhã.
 
-## 4. Resultado do teste
+### Quando a memória enche
 
-No teste registrado nos prints, o ESP32 ficou offline e guardou 20 leituras (buffer 20/3000). No meio do teste, a temperatura do DHT22 subiu para 38,9 °C e o botão foi tocado rapidamente. O próprio ESP32 classificou as leituras como FEBRE e FEBRE+TAQUICARDIA e acendeu o LED vermelho, ainda sem internet.
+A leitura mais antiga dá lugar à mais nova, e um contador registra quantas foram descartadas. Fiz essa escolha porque, para quem cuida da pessoa, saber como ela está agora vale mais do que saber como estava 8 horas atrás.
 
-Ao passar a chave para online, o Serial mostrou `[REDE] ONLINE: sincronizando 20 leituras guardadas`. As leituras saíram em ordem (`seq` 1, 2, 3...), cada uma com o atraso real (`atraso_s` 39, 37, 35...), e o processo terminou com `[SYNC] buffer vazio: tudo sincronizado`. Nenhuma leitura foi perdida (`perdidas 0`).
+### Enviar sem travar
 
-![Offline: buffer crescendo e alerta local](../prints/01_wokwi_offline_buffer_alerta.jpg)
+Quando a conexão volta, o aparelho envia no máximo 25 leituras de cada vez e volta a medir. Assim, mesmo com milhares de leituras na fila, ele não para de vigiar a pessoa enquanto sincroniza.
 
-![Online: 20 leituras guardadas sendo enviadas em ordem](../prints/02_wokwi_online_sincronizando.jpg)
+### Saber se algo se perdeu
 
-## 5. Como testar no Wokwi
+Cada leitura sai com um número em sequência e com o tempo que ficou esperando (em segundos). Se aparecer um buraco na numeração, alguma leitura faltou. Pelo tempo de espera, o painel consegue mostrar que aquele dado "veio da reserva" e não é ao vivo.
 
-1. Inicie a simulação com a chave na **esquerda (offline)**. O Serial mostra `[OFFLINE] ... buffer 1/3000`, `2/3000`...
-2. Toque o botão em ritmo constante para gerar BPM. Clique no DHT22 e suba a temperatura acima de 38 °C: o LED vermelho acende.
-3. Passe a chave para a **direita (online)**. O Serial mostra `[REDE] ONLINE: sincronizando N leituras`, as linhas `[NUVEM] {...}` e, ao final, `[SYNC] buffer vazio`.
+## O teste
+
+Iniciei a simulação com a chave para a esquerda (offline). O aparelho guardou 20 leituras. No meio do caminho, subi a temperatura do sensor para 38,9 °C e toquei o botão bem rápido. O próprio ESP32 classificou as leituras como FEBRE e FEBRE + TAQUICARDIA e acendeu o LED vermelho, sem nenhuma conexão.
+
+Os batimentos perto de 250 por minuto nos prints não são um erro: toquei o botão bem rápido para provocar o alerta de taquicardia.
+
+Depois passei a chave para a direita. O Monitor Serial mostrou "ONLINE: sincronizando 20 leituras guardadas". Em seguida as leituras saíram na ordem (1, 2, 3...), cada uma com o tempo que tinha esperado (39 s, 37 s, 35 s...). No fim apareceu "buffer vazio: tudo sincronizado". Nenhuma leitura se perdeu.
+
+![Monitor Serial com as leituras guardadas offline; as últimas aparecem como febre e taquicardia, e o LED vermelho está aceso](../prints/01_wokwi_offline_buffer_alerta.jpg)
+
+![Monitor Serial ao voltar a conexão: as 20 leituras guardadas são enviadas em ordem, cada uma com o seu tempo de espera](../prints/02_wokwi_online_sincronizando.jpg)
+
+![Fim da sincronização: o Monitor Serial avisa que a reserva ficou vazia e as leituras novas passam a sair ao vivo](../prints/02b_wokwi_sync_concluido.jpg)
+
+## Para testar você mesmo
+
+Abra o link do Wokwi e inicie a simulação. Deixe a chave para a esquerda por alguns segundos e acompanhe o contador do buffer subindo. Toque o botão e mexa na temperatura do DHT22. Depois passe a chave para a direita e veja as leituras guardadas saindo pelo Monitor Serial.
