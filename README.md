@@ -1,110 +1,117 @@
-# CardioIA Conectada — Fase 3: IoT e visualização de dados para a saúde digital
+# CardioIA Conectada · Fase 3
 
-**FIAP — Inteligência Artificial, 2º ano (Fase 3)**  
-**Aluno:** Marlon Paulino Marinho — RM566793 (grupo individual)
+FIAP, Inteligência Artificial, 2º ano (turma 2TIAOR)  
+Marlon Paulino Marinho, RM566793 · Grupo 67 (faço o projeto sozinho)
 
-Protótipo de um **monitor cardíaco vestível** que cobre o fluxo completo de dados em IoT aplicado à saúde:
+Nesta fase, simulei no Wokwi um monitor cardíaco vestível que mede a temperatura e os batimentos de uma pessoa, guarda as medições quando a internet cai, envia tudo para a nuvem quando ela volta e mostra o resultado num painel com alertas. No desafio extra (Ir Além 1), um programa em Python recebe essas leituras por uma API e manda um e-mail para a equipe de saúde quando algo sai do normal.
 
-**captura → processamento local → transmissão → visualização → alerta**
+## Links rápidos
 
-- **Simulação no Wokwi:** https://wokwi.com/projects/479676068207522817
-- **Relatório Parte 1 (Edge):** [`docs/relatorio_parte1_edge.pdf`](docs/relatorio_parte1_edge.pdf)
-- **Relatório Parte 2 (MQTT + Dashboard):** [`docs/relatorio_parte2_mqtt_dashboard.pdf`](docs/relatorio_parte2_mqtt_dashboard.pdf)
-
----
-
-## Arquitetura
-
-```
- [ESP32 + DHT22 + botão]  --MQTT-->  [HiveMQ broker]  --MQTT-->  [Node-RED]  -->  [Dashboard]
-   Edge: buffer offline              broker.hivemq.com           Fog: regras        gráfico, gauge,
-   + alerta local (LED)              cardioia/rm566793/#         de alerta          texto e LED
-```
-
-| Componente | Pino | Função |
-|---|---|---|
-| DHT22 | GPIO 15 | Temperatura e umidade (sensor 1, obrigatório) |
-| Botão "Batimento" | GPIO 4 | Cada toque = 1 batimento → BPM (sensor 2) |
-| Chave deslizante | GPIO 5 | Simula o Wi-Fi: direita = online, esquerda = offline |
-| LED vermelho | GPIO 2 | Alerta clínico (febre, taquicardia, bradicardia) |
-| LED azul | GPIO 18 | Online e sincronizando |
-
-## Estrutura do repositório
-
-```
-esp32/
-  sketch.ino          código C++ comentado (Wokwi / Arduino IDE)
-  diagram.json        circuito do Wokwi
-  libraries.txt       bibliotecas: DHT sensor library for ESPx, PubSubClient
-node-red/
-  flow_cardioia.json  fluxo exportado (MQTT -> regras -> dashboard)
-docs/
-  relatorio_parte1_edge.pdf
-  relatorio_parte2_mqtt_dashboard.pdf
-prints/               evidências (Wokwi, Serial, Node-RED e dashboard)
-```
-
-## Parte 1 — Edge Computing e resiliência offline
-
-- Leitura a cada 2 s na demonstração (no produto real, a cada 10 s).
-- **Toda leitura vai primeiro para um buffer circular** de **3.000 amostras** (12 bytes cada, cerca de 36 KB de RAM).
-- **Offline:** continua coletando. O Serial mostra `[OFFLINE] leitura #N guardada | buffer N/3000`.
-- **Online:** envia da mais antiga para a mais nova (`Serial.println` + MQTT) e só apaga cada leitura depois do envio aceito. Ao final aparece `[SYNC] buffer vazio`.
-- **Por que 3.000?** A 1 leitura a cada 10 s, cobre **8 h 20 min sem internet** (uma noite de sono). Se lotar, a mais antiga é sobrescrita e o contador `perdidas` registra o descarte.
-- **SPIFFS:** é volátil no simulador (como o próprio enunciado explica). A mesma lógica de buffer gravaria em SPIFFS ou microSD num ESP32 físico.
-
-## Parte 2 — MQTT e dashboard
-
-- **Broker:** `broker.hivemq.com:1883` (HiveMQ público).
-- **Tópicos:** `cardioia/rm566793/vitais` (leituras) e `cardioia/rm566793/status` (estado, com *Last Will*).
-- **Mensagem:**
-  ```json
-  {"id":"cardioia-rm566793","seq":42,"temp":36.6,"umid":55,"bpm":84,"alerta":"OK","atraso_s":0}
-  ```
-- **Dashboard (Node-RED + node-red-dashboard):**
-  - gráfico de linha com BPM e temperatura;
-  - gauge de temperatura (34–42 °C);
-  - texto de estado e LED virtual de alerta;
-  - status do dispositivo e ocupação do buffer.
-
-| Regra de alerta | Limite |
+| O quê | Onde |
 |---|---|
-| FEBRE | temperatura > 38,0 °C |
-| TAQUICARDIA | BPM > 120 |
-| BRADICARDIA | BPM < 50 (com pulso detectado) |
+| Simulação no Wokwi | https://wokwi.com/projects/479676068207522817 |
+| Relatório da Parte 1 (armazenamento local) | [docs/relatorio_parte1_edge.pdf](docs/relatorio_parte1_edge.pdf) |
+| Relatório da Parte 2 (MQTT e dashboard) | [docs/relatorio_parte2_mqtt_dashboard.pdf](docs/relatorio_parte2_mqtt_dashboard.pdf) |
+| Relatório do Ir Além 1 (API REST e e-mail) | [docs/relatorio_ir_alem_1.pdf](docs/relatorio_ir_alem_1.pdf) |
+| Código do Ir Além 1 | [ir_alem_1/](ir_alem_1/) |
 
-## Como executar
+## O problema
 
-**1. Simulação**
-1. Abra o link do Wokwi e clique em ▶.
-2. Com a chave na **esquerda (offline)**, toque o botão no ritmo de um coração e veja o buffer crescer no Monitor Serial.
-3. Clique no DHT22 e suba a temperatura para mais de 38 °C: o LED vermelho acende.
-4. Passe a chave para a **direita (online)**: as leituras guardadas são enviadas e o buffer esvazia.
+Quem tem problema no coração precisa ser acompanhado o tempo todo, inclusive em casa. Um aparelho vestível resolve parte disso, mas cria outro problema: a internet de casa cai, o celular fica sem sinal, o roteador reinicia. Se o aparelho só soubesse mandar dados ao vivo, cada queda viraria um buraco no histórico da pessoa, e talvez justamente na hora em que algo aconteceu.
 
-**2. Node-RED**
+Por isso o projeto foi pensado em camadas. O próprio aparelho já sabe guardar as medições e acender um alerta sozinho. A nuvem e o painel entram depois, para quem acompanha de longe.
+
+![Diagrama: o ESP32 publica as leituras por MQTT no broker HiveMQ; o Node-RED assina, confere os limites e alimenta o dashboard; no Ir Além 1, um programa Python envia e busca as leituras numa API REST e dispara e-mails de alerta](docs/img/arquitetura.png)
+
+## O que tem em cada pasta
+
+| Pasta | Conteúdo |
+|---|---|
+| `esp32/` | Código do ESP32 (`sketch.ino`), circuito do Wokwi (`diagram.json`) e bibliotecas usadas (`libraries.txt`) |
+| `node-red/` | Fluxo do Node-RED exportado (`flow_cardioia.json`), pronto para importar |
+| `ir_alem_1/` | API REST, cliente, regras de risco, envio de e-mail, testes e uma saída de exemplo |
+| `docs/` | Os três relatórios em PDF (e o texto original em Markdown) |
+| `prints/` | Telas que comprovam o funcionamento |
+
+## Como testar
+
+### Parte 1 e Parte 2: o aparelho, a nuvem e o painel
+
+1. Abra o link do Wokwi e clique no botão verde de iniciar.
+2. A chave deslizante no canto funciona como o Wi-Fi. Para a esquerda, o aparelho fica offline. Para a direita, online.
+3. Com a chave para a esquerda, veja no Monitor Serial as leituras sendo guardadas (`buffer 1/3000`, `2/3000`...).
+4. Toque no botão vermelho no ritmo de um coração para gerar os batimentos. Clique no sensor DHT22 e suba a temperatura acima de 38 °C: o LED vermelho acende.
+5. Passe a chave para a direita. O aparelho envia tudo o que guardou, na ordem certa, e o buffer volta a zero.
+
+Para ver o painel, instale o Node-RED no computador (`npm install -g --unsafe-perm node-red`) e rode `node-red`. Abra `http://127.0.0.1:1880`, instale o pacote `node-red-dashboard` em *Manage palette*, importe o arquivo `node-red/flow_cardioia.json` e clique em *Deploy*. O painel fica em `http://127.0.0.1:1880/ui` e começa a receber os dados do Wokwi na hora.
+
+### Ir Além 1: API REST e alerta por e-mail
+
+Precisa de Python 3.10 ou mais novo.
+
 ```bash
-npm install -g --unsafe-perm node-red
-node-red
+cd ir_alem_1
+pip install -r requirements.txt
+python executar_demo.py
 ```
-1. Abra `http://127.0.0.1:1880`.
-2. Em **Menu → Manage palette → Install**, instale `node-red-dashboard`.
-3. Em **Menu → Import**, importe `node-red/flow_cardioia.json` e clique em **Deploy**.
-4. O dashboard fica em `http://127.0.0.1:1880/ui`.
 
-## Evidências
+Esse comando liga a API, liga um "correio de teste" no próprio computador, simula 12 leituras de um paciente e mostra numa tabela o que aconteceu com cada uma. Os e-mails de alerta ficam salvos na pasta `ir_alem_1/caixa_de_entrada/` e abrem no Outlook ou no Bloco de Notas. Para conferir só as regras de risco, rode `python teste_regras.py`.
 
-| Offline: buffer e alerta local | Online: sincronização |
-|---|---|
-| ![](prints/01_wokwi_offline_buffer_alerta.jpg) | ![](prints/02_wokwi_online_sincronizando.jpg) |
+## Decisões que tomei e por quê
 
-![Fluxo Node-RED](prints/03_nodered_fluxo.jpg)
+### Guardar até 3.000 leituras no aparelho
+
+Cada leitura ocupa 12 bytes, então 3.000 leituras usam cerca de 36 KB, uma parte pequena da memória do ESP32. No uso real, com uma medição a cada 10 segundos, isso cobre mais de 8 horas sem internet, o suficiente para uma noite de sono. Se a memória encher, a leitura mais antiga dá lugar à mais nova, porque para a equipe de saúde o estado atual da pessoa importa mais do que o de horas atrás.
+
+### Só apagar uma leitura depois que ela chegou
+
+O aparelho tenta enviar e só tira a leitura da memória quando o envio dá certo. Cada leitura tem um número em sequência, o que permite ver se alguma se perdeu.
+
+### Alerta em dois lugares
+
+O ESP32 acende o LED mesmo sem internet. O Node-RED confere os mesmos limites quando os dados chegam. Se uma das partes falhar, a outra continua avisando.
+
+### Broker público na demonstração
+
+Usei o broker gratuito da HiveMQ porque ele funciona dentro do Wokwi sem cadastro. Ele não tem senha, então qualquer pessoa que souber o tópico consegue ler. Num produto de verdade, o certo seria o HiveMQ Cloud com conexão criptografada e usuário por aparelho.
+
+### E-mail sem exagero
+
+O robô do Ir Além 1 não repete o mesmo aviso em menos de 10 minutos, para a equipe não começar a ignorar os e-mails. Se a situação piorar (de "atenção" para "crítico"), o aviso sai na hora.
+
+## Resultados
+
+No teste registrado nos prints, o aparelho ficou offline e guardou 20 leituras. Cinco delas tinham febre, e três dessas também batimentos acima de 120 (toquei o botão bem rápido para provocar o alerta; por isso aparecem valores perto de 250). Ao voltar a internet, enviou as 20 na ordem, sem perder nenhuma. O painel mostrou os alertas de febre e de taquicardia e voltou ao normal quando os valores baixaram. No Ir Além 1, das 12 leituras simuladas, 5 geraram alerta e cada uma virou um e-mail. Na leitura 6, a febre já tinha sido avisada pouco antes, então o e-mail falou só da taquicardia, que era a novidade.
+
+| Offline: leituras guardadas e LED aceso | Online: envio do que estava guardado | Fim da sincronização |
+|---|---|---|
+| ![Monitor Serial do Wokwi com as leituras guardadas offline, incluindo febre e taquicardia, e o LED vermelho aceso](prints/01_wokwi_offline_buffer_alerta.jpg) | ![Monitor Serial mostrando a sincronização das 20 leituras guardadas, em ordem e com o tempo de atraso](prints/02_wokwi_online_sincronizando.jpg) | ![Monitor Serial com a mensagem de que a reserva ficou vazia e tudo foi sincronizado](prints/02b_wokwi_sync_concluido.jpg) |
+
+![Fluxo do Node-RED com as duas entradas MQTT conectadas e as mensagens chegando na barra lateral](prints/03_nodered_fluxo.jpg)
 
 | Febre | Taquicardia | Normal |
 |---|---|---|
-| ![](prints/05_dashboard_febre.jpg) | ![](prints/06_dashboard_taquicardia.jpg) | ![](prints/04_dashboard_normal.jpg) |
+| ![Painel com o medidor de temperatura em 38,9 °C, no vermelho, e o alerta de febre ativo](prints/05_dashboard_febre.jpg) | ![Painel com o gráfico de batimentos acima de 120 e o alerta de taquicardia ativo](prints/06_dashboard_taquicardia.jpg) | ![Painel de volta ao normal, com 36,8 °C, LED verde e nenhuma leitura perdida](prints/04_dashboard_normal.jpg) |
 
-## Segurança e limitações
+O painel não depende só de cor para avisar: cada alerta aparece também escrito ("FEBRE", "TAQUICARDIA", "ALERTA ATIVO"), o que ajuda quem tem dificuldade para distinguir cores.
 
-- O broker público é só para demonstração. Em produção, o caminho é HiveMQ Cloud com TLS (8883), credenciais por dispositivo e ACL por tópico, com as credenciais fora do repositório.
-- A mensagem não traz dado pessoal: só o identificador do aparelho (LGPD).
-- O BPM é simulado por botão. Os limites são didáticos e não substituem avaliação médica.
+## Limites do protótipo
+
+- Os batimentos vêm de toques num botão, não de um sensor de pulso real (como o MAX30102).
+- O SPIFFS, a memória de arquivos do ESP32, não guarda nada no simulador. Por isso a reserva offline fica na memória RAM. Num ESP32 físico, a mesma lógica gravaria no SPIFFS ou num cartão microSD.
+- Os limites de alerta são didáticos e não substituem a avaliação de profissionais de saúde.
+- As mensagens não levam nome nem documento da pessoa, só um código do aparelho, pensando na LGPD.
+
+## Glossário rápido
+
+| Termo | O que quer dizer aqui |
+|---|---|
+| ESP32 | Pequeno computador com Wi-Fi, usado em aparelhos de IoT |
+| Wokwi | Site que simula o ESP32 e os sensores no navegador |
+| Buffer | Área de memória onde as leituras esperam até poderem ser enviadas |
+| MQTT | Protocolo leve de mensagens: um lado publica num tópico, o outro assina |
+| Broker | O "correio" do MQTT, que recebe e entrega as mensagens |
+| Node-RED | Ferramenta visual para montar fluxos de dados ligando blocos |
+| API REST | Forma padrão de sistemas conversarem pela web usando HTTP |
+| SMTP | Protocolo usado para enviar e-mails |
+| Edge, Fog e Cloud | Processar no aparelho, num computador próximo ou num servidor distante |
