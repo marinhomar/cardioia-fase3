@@ -1,0 +1,289 @@
+[
+  {
+    "id": "tab_cardioia",
+    "type": "tab",
+    "label": "CardioIA Conectada",
+    "disabled": false,
+    "info": "ESP32 (Wokwi) -> HiveMQ (broker.hivemq.com) -> Node-RED -> Dashboard.\nTópicos: cardioia/rm566793/vitais e cardioia/rm566793/status"
+  },
+  {
+    "id": "broker_hivemq",
+    "type": "mqtt-broker",
+    "name": "HiveMQ público",
+    "broker": "broker.hivemq.com",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "closeTopic": "",
+    "willTopic": ""
+  },
+  {
+    "id": "ui_tab_cardio",
+    "type": "ui_tab",
+    "name": "CardioIA",
+    "icon": "favorite",
+    "order": 1,
+    "disabled": false,
+    "hidden": false
+  },
+  {
+    "id": "ui_grp_sinais",
+    "type": "ui_group",
+    "name": "Sinais vitais em tempo real",
+    "tab": "ui_tab_cardio",
+    "order": 1,
+    "disp": true,
+    "width": "12",
+    "collapse": false
+  },
+  {
+    "id": "ui_grp_alerta",
+    "type": "ui_group",
+    "name": "Alertas e conexão",
+    "tab": "ui_tab_cardio",
+    "order": 2,
+    "disp": true,
+    "width": "6",
+    "collapse": false
+  },
+  {
+    "id": "mqtt_in_vitais",
+    "type": "mqtt in",
+    "z": "tab_cardioia",
+    "name": "ESP32 -> vitais",
+    "topic": "cardioia/rm566793/vitais",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "broker_hivemq",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 140,
+    "y": 120,
+    "wires": [
+      [
+        "fn_separar",
+        "dbg_vitais"
+      ]
+    ]
+  },
+  {
+    "id": "fn_separar",
+    "type": "function",
+    "z": "tab_cardioia",
+    "name": "Separar sinais e checar limites",
+    "func": "// Recebe uma leitura do ESP32 e distribui para cada widget do painel.\n// Limites do projeto: febre > 38 °C, taquicardia > 120 bpm, bradicardia < 50 bpm (com pulso).\nconst d = msg.payload;\nif (typeof d !== 'object' || d === null) return null;\n\nconst temp = Number(d.temp);\nconst bpm  = Number(d.bpm);\n\nlet alerta = [];\nif (temp > 38) alerta.push('FEBRE');\nif (bpm > 120) alerta.push('TAQUICARDIA');\nif (bpm > 0 && bpm < 50) alerta.push('BRADICARDIA');\nconst emAlerta = alerta.length > 0;\n\n// Leitura que ficou guardada offline chega com atraso_s > 0\nconst origem = d.atraso_s > 5 ? ` (veio do buffer, medida há ${d.atraso_s}s)` : '';\n\nconst msgBpm   = { topic: 'BPM', payload: bpm };\nconst msgTemp  = { topic: 'Temperatura (°C)', payload: temp };\nconst msgGauge = { payload: temp };\nconst msgAlerta = {\n    payload: emAlerta\n        ? `<b style=\"color:#e53935\">⚠ ${alerta.join(' + ')}</b> — leitura #${d.seq}${origem}`\n        : `<span style=\"color:#43a047\">● Normal</span> — leitura #${d.seq}${origem}`\n};\nconst msgLed = { payload: emAlerta };\n\nreturn [msgBpm, msgTemp, msgGauge, msgAlerta, msgLed];",
+    "outputs": 5,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 400,
+    "y": 120,
+    "wires": [
+      [
+        "chart_sinais"
+      ],
+      [
+        "chart_sinais"
+      ],
+      [
+        "gauge_temp"
+      ],
+      [
+        "txt_alerta"
+      ],
+      [
+        "tpl_led"
+      ]
+    ]
+  },
+  {
+    "id": "chart_sinais",
+    "type": "ui_chart",
+    "z": "tab_cardioia",
+    "name": "Gráfico BPM e temperatura",
+    "group": "ui_grp_sinais",
+    "order": 1,
+    "width": "12",
+    "height": "6",
+    "label": "Batimentos (bpm) e temperatura (°C)",
+    "chartType": "line",
+    "legend": "true",
+    "xformat": "HH:mm:ss",
+    "interpolate": "linear",
+    "nodata": "Aguardando o ESP32...",
+    "dot": true,
+    "ymin": "0",
+    "ymax": "260",
+    "removeOlder": "10",
+    "removeOlderPoints": "",
+    "removeOlderUnit": "60",
+    "cutout": 0,
+    "useOneColor": false,
+    "useUTC": false,
+    "colors": [
+      "#e53935",
+      "#1e88e5",
+      "#ff7f0e",
+      "#2ca02c",
+      "#98df8a",
+      "#d62728",
+      "#ff9896",
+      "#9467bd",
+      "#c5b0d5"
+    ],
+    "outputs": 1,
+    "useDifferentColor": false,
+    "className": "",
+    "x": 720,
+    "y": 60,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "gauge_temp",
+    "type": "ui_gauge",
+    "z": "tab_cardioia",
+    "name": "Gauge temperatura",
+    "group": "ui_grp_alerta",
+    "order": 1,
+    "width": "6",
+    "height": "4",
+    "gtype": "gage",
+    "title": "Temperatura corporal",
+    "label": "°C",
+    "format": "{{value | number:1}}",
+    "min": "34",
+    "max": "42",
+    "colors": [
+      "#1e88e5",
+      "#43a047",
+      "#e53935"
+    ],
+    "seg1": "37.5",
+    "seg2": "38",
+    "diff": false,
+    "className": "",
+    "x": 700,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "txt_alerta",
+    "type": "ui_text",
+    "z": "tab_cardioia",
+    "group": "ui_grp_alerta",
+    "order": 2,
+    "width": "6",
+    "height": "1",
+    "name": "Texto de alerta",
+    "label": "Estado:",
+    "format": "{{msg.payload}}",
+    "layout": "row-left",
+    "className": "",
+    "style": false,
+    "font": "",
+    "fontSize": "",
+    "color": "#000000",
+    "x": 690,
+    "y": 180,
+    "wires": []
+  },
+  {
+    "id": "tpl_led",
+    "type": "ui_template",
+    "z": "tab_cardioia",
+    "group": "ui_grp_alerta",
+    "name": "LED de alerta",
+    "order": 3,
+    "width": "6",
+    "height": "1",
+    "format": "<div style=\"display:flex;align-items:center;gap:12px;padding:4px 0\"><div ng-style=\"{width:'30px',height:'30px','border-radius':'50%',background:(msg.payload?'#e53935':'#43a047'),'box-shadow':(msg.payload?'0 0 16px #e53935':'none')}\"></div><b>{{msg.payload ? 'ALERTA ATIVO' : 'Sem alerta'}}</b></div>",
+    "storeOutMessages": true,
+    "fwdInMessages": true,
+    "resendOnRefresh": true,
+    "templateScope": "local",
+    "className": "",
+    "x": 700,
+    "y": 240,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "mqtt_in_status",
+    "type": "mqtt in",
+    "z": "tab_cardioia",
+    "name": "ESP32 -> status",
+    "topic": "cardioia/rm566793/status",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "broker_hivemq",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 140,
+    "y": 300,
+    "wires": [
+      [
+        "fn_status"
+      ]
+    ]
+  },
+  {
+    "id": "fn_status",
+    "type": "function",
+    "z": "tab_cardioia",
+    "name": "Formatar status",
+    "func": "const s = msg.payload || {};\nmsg.payload = `${s.estado || '?'} | buffer ${s.buffer ?? '-'} / ${s.capacidade ?? '-'} | perdidas ${s.perdidas ?? 0}`;\nreturn msg;",
+    "outputs": 1,
+    "x": 400,
+    "y": 300,
+    "wires": [
+      [
+        "txt_status"
+      ]
+    ]
+  },
+  {
+    "id": "txt_status",
+    "type": "ui_text",
+    "z": "tab_cardioia",
+    "group": "ui_grp_alerta",
+    "order": 4,
+    "width": "6",
+    "height": "1",
+    "name": "Status do dispositivo",
+    "label": "Dispositivo:",
+    "format": "{{msg.payload}}",
+    "layout": "row-left",
+    "x": 700,
+    "y": 300,
+    "wires": []
+  },
+  {
+    "id": "dbg_vitais",
+    "type": "debug",
+    "z": "tab_cardioia",
+    "name": "Ver JSON recebido",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "x": 390,
+    "y": 60,
+    "wires": []
+  }
+]
