@@ -1,0 +1,23 @@
+# Copie este arquivo com o nome ".env" (nesta mesma pasta) só se quiser mudar o padrão.
+# Sem .env, tudo roda no seu computador: API em 127.0.0.1:5000 e
+# e-mails salvos em caixa_de_entrada/ pelo correio de teste.
+
+API_URL=http://127.0.0.1:5000
+
+# Correio de teste local (padrão)
+SMTP_HOST=127.0.0.1
+SMTP_PORT=1025
+SMTP_SSL=nao
+EMAIL_REMETENTE=monitor@cardioia.local
+EMAIL_DESTINO=equipe.plantao@cardioia.local
+
+# Para enviar de verdade pelo Gmail, troque pelas linhas abaixo.
+# A senha é uma "senha de app" do Google, nunca a senha normal da conta.
+# Não suba o arquivo .env para o GitHub.
+# SMTP_HOST=smtp.gmail.com
+# SMTP_PORT=465
+# SMTP_SSL=sim
+# SMTP_USUARIO=seu.email@gmail.com
+# SMTP_SENHA=senha-de-app-aqui
+# EMAIL_REMETENTE=seu.email@gmail.com
+# EMAIL_DESTINO=quem.vai.receber@exemplo.com
